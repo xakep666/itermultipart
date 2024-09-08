@@ -8,10 +8,10 @@ import (
 	"net/http"
 )
 
-// Parts reads each part from the multipart reader and yields it to the caller.
-// If raw is true, it reads the raw part using [multipart.Part.NextRawPart].
+// PartsFromReader reads each part from the provided [multipart.Reader] and yields it to the caller.
+// If raw is true, it reads the raw part using [multipart.Reader.NextRawPart].
 // Note that [Part] becomes invalid on the next iteration so reference to it must not be held.
-func Parts(r *multipart.Reader, raw bool) iter.Seq2[*Part, error] {
+func PartsFromReader(r *multipart.Reader, raw bool) iter.Seq2[*Part, error] {
 	return func(yield func(*Part, error) bool) {
 		p := new(Part)
 		for {
@@ -55,5 +55,5 @@ func PartsFromRequest(r *http.Request, raw bool) iter.Seq2[*Part, error] {
 			yield(nil, err)
 		}
 	}
-	return Parts(reader, raw)
+	return PartsFromReader(reader, raw)
 }

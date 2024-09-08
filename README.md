@@ -50,7 +50,7 @@ func SimpleFileSaveHandler(w http.ResponseWriter, *r http.Request) {
 }
 ```
 
-Also, you can feed standard `multipart.Reader` to `itermultipart.Parts` function.
+Also, you can feed standard `multipart.Reader` to [itermultipart.PartsFromReader](https://pkg.go.dev/github.com/xakep666/itermultipart#PartsFromReader) function.
 
 ## Creating HTTP request
 

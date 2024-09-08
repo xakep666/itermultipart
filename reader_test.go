@@ -26,7 +26,7 @@ value for key
 	message = strings.ReplaceAll(message, "\n", "\r\n")
 	reader := multipart.NewReader(strings.NewReader(message), "boundary")
 
-	for part, err := range itermultipart.Parts(reader, false) {
+	for part, err := range itermultipart.PartsFromReader(reader, false) {
 		if err != nil {
 			panic(err)
 		}
