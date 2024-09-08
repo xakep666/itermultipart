@@ -279,11 +279,3 @@ func (s *Source) Reset(parts iter.Seq2[*Part, error]) {
 	s.lastPart = nil
 	s.closed = false
 }
-
-type errorReader struct {
-	err error
-}
-
-func (r *errorReader) Read([]byte) (n int, err error) {
-	return 0, r.err
-}
