@@ -14,13 +14,13 @@ import (
 
 // Source is a generator of multipart message as you read from it.
 type Source struct {
-	randBoundary []byte                  // used only on bootstraps
+	randBoundary [30]byte                // used only on bootstraps
 	boundary     string                  // used in the message
 	parts        iter.Seq2[*Part, error] // for WriteTo
 
 	pull                func() (*Part, error, bool)
 	stop                func()
-	ongoingBuffer       *bytes.Buffer // accumulates boundary+headers
+	buffered            *bytes.Buffer // accumulates boundary+headers
 	firstHeadingWritten bool
 	lastPart            *Part
 	finalizing          bool
@@ -32,18 +32,15 @@ type Source struct {
 // [Source] holds reference for [Part] only until it's fully read.
 func NewSource(parts iter.Seq2[*Part, error]) *Source {
 	src := &Source{
-		parts:         parts,
-		ongoingBuffer: new(bytes.Buffer),
+		parts:    parts,
+		buffered: new(bytes.Buffer),
 	}
 	src.populateRandomBoundary()
 	return src
 }
 
 func (s *Source) populateRandomBoundary() {
-	if s.randBoundary == nil {
-		s.randBoundary = make([]byte, 30)
-	}
-	_, err := io.ReadFull(rand.Reader, s.randBoundary)
+	_, err := io.ReadFull(rand.Reader, s.randBoundary[:])
 	if err != nil {
 		panic(err)
 	}
@@ -86,9 +83,9 @@ func (s *Source) Read(p []byte) (n int, err error) {
 		s.populatePartHeading(part)
 	}
 
-	if s.ongoingBuffer.Len() > 0 {
+	if s.buffered.Len() > 0 {
 		// we have some buffered data, read it first
-		bufRead, bufReadErr := s.ongoingBuffer.Read(p)
+		bufRead, bufReadErr := s.buffered.Read(p)
 		switch {
 		case errors.Is(bufReadErr, nil):
 			n += bufRead
@@ -102,6 +99,7 @@ func (s *Source) Read(p []byte) (n int, err error) {
 
 	if s.finalizing {
 		if n > 0 {
+			// do not return EOF if we read some data
 			return n, nil
 		}
 		return 0, io.EOF
@@ -137,8 +135,7 @@ func (s *Source) WriteTo(target io.Writer) (int64, error) {
 			return n, err
 		}
 
-		// write part content
-		contentSize, err := io.Copy(target, part.Content)
+		contentSize, err := s.writePartContent(part, target)
 		n += contentSize
 		if err != nil {
 			return n, err
@@ -151,39 +148,64 @@ func (s *Source) WriteTo(target io.Writer) (int64, error) {
 	return n, err
 }
 
-func (s *Source) populatePartHeading(part *Part) *bytes.Buffer {
-	s.ongoingBuffer.Reset()
-	if !s.firstHeadingWritten {
-		s.firstHeadingWritten = true
-		s.ongoingBuffer.WriteString("--")
-	} else {
-		s.ongoingBuffer.WriteString("\r\n--")
+func (s *Source) writePartContent(part *Part, target io.Writer) (int64, error) {
+	// if ReaderFrom or WriterTo is implemented, use it. Checking order matches io.Copy.
+	if wt, ok := part.Content.(io.WriterTo); ok {
+		return wt.WriteTo(target)
 	}
-	s.ongoingBuffer.WriteString(s.boundary)
-	for _, k := range slices.Sorted(maps.Keys(part.Header)) {
-		for _, v := range part.Header[k] {
-			s.ongoingBuffer.WriteString("\r\n")
-			s.ongoingBuffer.WriteString(k)
-			s.ongoingBuffer.WriteString(": ")
-			s.ongoingBuffer.WriteString(v)
+	if rf, ok := target.(io.ReaderFrom); ok {
+		return rf.ReadFrom(part.Content)
+	}
+
+	// allocate or reuse buffer for copying
+	bufferSize := 32 * 1024 // default value from io.CopyBuffer
+	if l, ok := part.Content.(*io.LimitedReader); ok && int64(bufferSize) > l.N {
+		if l.N < 1 {
+			bufferSize = 1
+		} else {
+			bufferSize = int(l.N)
 		}
 	}
-	s.ongoingBuffer.WriteString("\r\n\r\n")
-	return s.ongoingBuffer
+	s.buffered.Reset()
+	s.buffered.Grow(bufferSize)
+
+	// copy content
+	return io.CopyBuffer(target, part.Content, s.buffered.Bytes())
+}
+
+func (s *Source) populatePartHeading(part *Part) *bytes.Buffer {
+	s.buffered.Reset()
+	if !s.firstHeadingWritten {
+		s.firstHeadingWritten = true
+		s.buffered.WriteString("--")
+	} else {
+		s.buffered.WriteString("\r\n--")
+	}
+	s.buffered.WriteString(s.boundary)
+	for _, k := range slices.Sorted(maps.Keys(part.Header)) {
+		for _, v := range part.Header[k] {
+			s.buffered.WriteString("\r\n")
+			s.buffered.WriteString(k)
+			s.buffered.WriteString(": ")
+			s.buffered.WriteString(v)
+		}
+	}
+	s.buffered.WriteString("\r\n\r\n")
+	return s.buffered
 }
 
 func (s *Source) populatePartEnding() *bytes.Buffer {
-	s.ongoingBuffer.Reset()
-	s.ongoingBuffer.WriteString("\r\n")
-	return s.ongoingBuffer
+	s.buffered.Reset()
+	s.buffered.WriteString("\r\n")
+	return s.buffered
 }
 
 func (s *Source) populateEnding() *bytes.Buffer {
-	s.ongoingBuffer.Reset()
-	s.ongoingBuffer.WriteString("\r\n--")
-	s.ongoingBuffer.WriteString(s.boundary)
-	s.ongoingBuffer.WriteString("--\r\n")
-	return s.ongoingBuffer
+	s.buffered.Reset()
+	s.buffered.WriteString("\r\n--")
+	s.buffered.WriteString(s.boundary)
+	s.buffered.WriteString("--\r\n")
+	return s.buffered
 }
 
 // SetBoundary overrides the [Source]'s default randomly-generated
@@ -194,11 +216,11 @@ func (s *Source) populateEnding() *bytes.Buffer {
 // at most 70 bytes long.
 func (s *Source) SetBoundary(boundary string) error {
 	if s.lastPart != nil {
-		return errors.New("mime: SetBoundary called after read")
+		return errors.New("SetBoundary called after read")
 	}
 	// rfc2046#section-5.1.1
 	if len(boundary) < 1 || len(boundary) > 70 {
-		return errors.New("mime: invalid boundary length")
+		return errors.New("invalid boundary length")
 	}
 	end := len(boundary) - 1
 	for i, b := range boundary {
@@ -213,14 +235,14 @@ func (s *Source) SetBoundary(boundary string) error {
 				continue
 			}
 		}
-		return errors.New("mime: invalid boundary character")
+		return errors.New("invalid boundary character")
 	}
 	s.boundary = boundary
 	return nil
 }
 
 // FormDataContentType returns the Content-Type for an HTTP
-// multipart/form-data with this [Writer]'s Boundary.
+// multipart/form-data with this [Source]'s Boundary.
 func (s *Source) FormDataContentType() string {
 	return mime.FormatMediaType("multipart/form-data", map[string]string{"boundary": s.boundary})
 }
@@ -235,9 +257,8 @@ func (s *Source) Close() error {
 	if s.stop != nil {
 		s.stop()
 	}
-	s.randBoundary = nil
 	s.boundary = ""
-	s.ongoingBuffer.Reset()
+	s.buffered.Reset()
 	s.firstHeadingWritten = false
 	s.finalizing = false
 	s.lastPart = nil
@@ -252,7 +273,7 @@ func (s *Source) Reset(parts iter.Seq2[*Part, error]) {
 	}
 	s.populateRandomBoundary()
 	s.parts = parts
-	s.ongoingBuffer.Reset()
+	s.buffered.Reset()
 	s.firstHeadingWritten = false
 	s.finalizing = false
 	s.lastPart = nil

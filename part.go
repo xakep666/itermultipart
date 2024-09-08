@@ -3,6 +3,7 @@ package itermultipart
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -27,6 +28,8 @@ type Part struct {
 
 	disposition       string
 	dispositionParams map[string]string
+
+	signature []byte // used for detecting content type
 }
 
 // NewPart creates a new part.
@@ -59,7 +62,8 @@ func (p *Part) FormName() string {
 	return p.dispositionParams["name"]
 }
 
-// SetFileName sets the file name of the part. It also sets the "Content-Type" header to "application/octet-stream".
+// SetFileName sets the file name of the part.
+// It also sets the "Content-Type" header to "application/octet-stream" like [multipart.Writer.CreateFormFile].
 func (p *Part) SetFileName(fileName string) *Part {
 	p.dispositionParams["filename"] = fileName
 	p.disposition = mime.FormatMediaType(formDataDisposition, p.dispositionParams)
@@ -127,27 +131,36 @@ func (p *Part) ContentType() string {
 // Content must be already set before calling this method.
 // If content-type cannot be detected, it sets the content type to "application/octet-stream".
 func (p *Part) DetectContentType() *Part {
-	const sniffLen = 512
-	var buf bytes.Buffer
-	buf.Grow(sniffLen)
-	_, err := io.CopyN(&buf, p.Content, sniffLen)
-	if err != nil && !errors.Is(err, io.EOF) {
-		// returns error on read
-		return p.SetContent(&errorReader{err: err})
+	if p.signature == nil {
+		p.signature = make([]byte, 512) // 512 bytes is the maximum sniffLen
 	}
 
-	p.SetContentType(http.DetectContentType(buf.Bytes()))
-
-	if errors.Is(err, io.EOF) {
-		return p.SetContent(&buf) // we can simply set the content to the buffer becase it's already fully read
+	signature := p.signature
+	n, err := io.ReadFull(p.Content, signature)
+	switch {
+	case errors.Is(err, nil):
+		p.SetContentType(http.DetectContentType(signature))
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		signature = signature[:n] // read less than 512 bytes, so we can set the content to the read bytes
+		return p.SetContentType(http.DetectContentType(signature)).SetContentBytes(signature)
+	default:
+		return p.SetContent(&errorReader{fmt.Errorf("peeking content for detecting content type: %w", err)})
 	}
 
-	return p.SetContent(io.MultiReader(&buf, p.Content))
+	// if Seek is supported, just rewind the content
+	if seeker, ok := p.Content.(io.Seeker); ok {
+		if _, err = seeker.Seek(0, io.SeekStart); err != nil {
+			return p.SetContent(&errorReader{fmt.Errorf("seek after detecting content type: %w", err)})
+		}
+
+		return p
+	}
+
+	return p.SetContent(io.MultiReader(bytes.NewReader(signature), p.Content))
 }
 
 // SetContentTypeByExtension sets the content type of the part based on the file extension.
 // If the file name was not set, it does nothing.
-// If extension is not recognized, it sets the content type to "application/octet-stream".
 // The content type is set using [mime.TypeByExtension] so you can register custom types using [mime.AddExtensionType].
 func (p *Part) SetContentTypeByExtension() *Part {
 	if p.FileName() == "" {
