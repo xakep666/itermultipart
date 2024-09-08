@@ -2,7 +2,7 @@ itermultipart - A convenient way to work with `multipart/form-data` messages usi
 =======
 
 [![Build Status](https://github.com/xakep666/itermultipart/actions/workflows/testing.yml/badge.svg)](https://github.com/xakep666/itermultipart/actions/workflows/testing.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/xakep666/itermultipart)](https://goreportcard.com/report/github.com/xakep666/itermultipart)
+[![Go Report Card](https://goreportcard.com/badge/github.com/xakep666/itermultipart?service=github)](https://goreportcard.com/report/github.com/xakep666/itermultipart)
 [![Go Reference](https://pkg.go.dev/badge/github.com/xakep666/itermultipart.svg)](https://pkg.go.dev/github.com/xakep666/itermultipart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
